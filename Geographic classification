@@ -1,0 +1,289 @@
+
+--extract zip codes classified in to Urban, Rural and Suburban
+
+drop table if exists zip_classification;
+create temporary table zip_classification as 
+select 
+	zip,
+	state,
+	city,
+	county,
+	type_code,
+	ruralcode,
+	latitude,
+	longitude
+from esd_getdata_zip;
+
+
+--importing AirBnB data. Using this data to morph as a person level grain insted of a preperty level garin solely for the pourpose of this excersise.
+
+drop table if exists aidbnb_data;
+create temporary table aidbnb_data as 
+select 
+	id,
+	name,
+	neighbourhood,
+	latitude,
+	longitude
+from nc_opn_bnb;
+
+
+--joining to NY Airbnb data to get zip code form latitidue and longitude
+
+drop table if exists nyc_resident;
+create temporary table nyc_resident as 
+select 
+	a.*,
+	b.zip,
+	b.city,
+	b.state,
+	b.ruralcode
+from aidbnb_data a left join zip_classification b
+	on a.latitude = b.latitude
+	and a.longitude = b.longitude;
+
+
+--importing NYC health providers data 
+
+drop table if exists nyc_health_providers;
+create temporary table nyc_health_providers as 
+select 
+	facility_id,
+	facility_name,
+	description,
+	address1,
+	address2, 
+	facility_state,
+	facility_zip,
+	facility_phone,
+	website,
+	facility_latitude,
+	facility_longitude
+from nyc_dep_of_health;
+
+--joining health providers data to residents data 
+--URBAN
+drop table if exists nyc_health_x_residents_urban
+create temporary table nyc_health_x_residents_urban as 
+select 
+	a.*,
+	b.facility name,
+	b.description,
+	b.address1,
+	b.address2, 
+	b.facility_state,
+	b.facility_zip,
+	b.facility_phone,
+	b.website,
+	b.facility_latitude,
+	b.facility_longitude
+	row_number() over(partition by id, facility_id) as facility_rnk
+from nyc_resident a join nyc_health_providers b
+	on a.zip =b.facility_zip
+where a.ruralcode='U';
+
+ --RURAL AND SUBURBAN
+drop table if exists nyc_health_x_residents_nonurban
+create temporary table nyc_health_x_residents_nonurban as 
+select 
+	a.*,
+	b.facility name,
+	b.description,
+	b.address1,
+	b.address2, 
+	b.facility_state,
+	b.facility_zip,
+	b.facility_phone,
+	b.website,
+	b.facility_latitude,
+	b.facility_longitude
+	row_number() over(partition by id, facility_id) as facility_rnk
+from nyc_resident a join nyc_health_providers b
+	on a.zip =b.facility_zip
+where a.ruralcode in ('S','R');
+
+--calculating geo distance
+--union of all geographies.The distance measure for Urbas in difference than suburban and rural due to the availabality of helth providers in these places
+
+drop table if exists facilities_distance;
+create temporary table facilities_distance as 
+select 
+	 *,  
+	 60*1.1515*(180*(acos((sin(radians(m_lat)) * sin(radians(p_lat))) +(cos(radians(m_lat)) * cos(radians(p_lat)) * cos(radians(m_lon - p_lon)))))/PI()) as dist,--caluclating distance measure
+	 row_number() over(partition by id, facility_id) as facility_rnk
+from nyc_health_x_residents_urban
+union distinct
+select 
+	 *,  
+	 60*1.1515*(180*(acos((sin(radians(m_lat)) * sin(radians(p_lat))) +(cos(radians(m_lat)) * cos(radians(p_lat)) * cos(radians(m_lon - p_lon)))))/PI()) as dist,--caluclating distance measure
+	 row_number() over(partition by id, facility_id) as facility_rnk
+from nyc_health_x_residents_nonurban;
+
+--Base Table
+
+drop table if exists base;
+create temporary table base
+as 
+select 
+	a.,
+	concat('https://www.google.com/maps/dir/', a.latitude, ',+' , a.longitude, '/' , a.facility_latitude, ',+' , a.facility_longitude) as directions
+from facilities_distance
+where facility_rnk <= 4;
+
+-- recomendation table
+
+drop table if exists member_recomendations;
+create table member_recomendations
+as
+    select
+	id,
+	name,
+	neighbourhood,
+	latitude,
+	longitude,
+	zip,
+	city,
+	state,
+	ruralcode,
+	map(facility_rnk, facility_name) as facility_name_map,
+	map(facility_rnk, facility_desc) as facility_desc_map,
+	map(facility_rnk, address1) as facility_add1_map,
+	map(facility_rnk, address2) as facility_add2_map,
+	map(facility_rnk, facility_state) as facility_state_map,
+	map(facility_rnk, website) as facility_site_map,
+	map(facility_rnk, cast(facility_phone as string)) as facility_ph_map,
+	map(facility_rnk, cast(facility_zip as string)) as facility_zip_map,
+	map(rcmd_rank, cast(facility_latitude as string)) as facility_latitude_map,
+    map(rcmd_rank, cast(facility_longitude as string)) as facility_longitude_map,
+	map(rcmd_rank, directions) as direction_map,
+from base;
+	
+	
+drop table if exists final_recomedation_table;
+create table final_recomedation_table
+as
+select 
+	a.id,
+	a.name,
+	a.neighbourhood,
+	a.latitude,
+	a.longitude,
+	a.zip,
+	a.city,
+	a.state,
+	a.ruralcode,
+    concat_ws('', collect_list(a.facility_name_map[1])) as facility_name_map_1,
+    concat_ws('', collect_list(a.facility_desc_map[1])) as facility_desc_map_1,
+    concat_ws('', collect_list(a.facility_add1_map[1])) as facility_add1_map_1,
+    concat_ws('', collect_list(a.facility_add2_map[1])) as facility_add2_map_1,
+    concat_ws('', collect_list(a.facility_state_map[1])) as facility_state_map_1,
+    concat_ws('', collect_list(a.facility_site_map[1])) as facility_site_map_1,
+    concat_ws('', collect_list(a.facility_ph_map[1])) as facility_ph_map_1,
+    concat_ws('', collect_list(a.facility_zip_map[1])) as facility_zip_map_1,
+	concat_ws('', collect_list(a.facility_latitude_map[1])) as facility_latitude_map_1,
+    concat_ws('', collect_list(a.facility_longitude_map[1])) as facility_longitude_map_1,
+    concat_ws('', collect_list(a.direction_map[1])) as direction_map_1,
+
+    concat_ws('', collect_list(a.facility_name_map[1])) as facility_name_map_2,
+    concat_ws('', collect_list(a.facility_desc_map[1])) as facility_desc_map_2,
+    concat_ws('', collect_list(a.facility_add1_map[1])) as facility_add1_map_2,
+    concat_ws('', collect_list(a.facility_add2_map[1])) as facility_add2_map_2,
+    concat_ws('', collect_list(a.facility_state_map[1])) as facility_state_map_2,
+    concat_ws('', collect_list(a.facility_site_map[1])) as facility_site_map_2,
+    concat_ws('', collect_list(a.facility_ph_map[1])) as facility_ph_map_2,
+    concat_ws('', collect_list(a.facility_zip_map[1])) as facility_zip_map_2,
+	concat_ws('', collect_list(a.facility_latitude_map[1])) as facility_latitude_map_2,
+    concat_ws('', collect_list(a.facility_longitude_map[1])) as facility_longitude_map_2,
+    concat_ws('', collect_list(a.direction_map[1])) as direction_map_2,
+	
+	concat_ws('', collect_list(a.facility_name_map[1])) as facility_name_map_3,
+    concat_ws('', collect_list(a.facility_desc_map[1])) as facility_desc_map_3,
+    concat_ws('', collect_list(a.facility_add1_map[1])) as facility_add1_map_3,
+    concat_ws('', collect_list(a.facility_add2_map[1])) as facility_add2_map_3,
+    concat_ws('', collect_list(a.facility_state_map[1])) as facility_state_map_3,
+    concat_ws('', collect_list(a.facility_site_map[1])) as facility_site_map_3,
+    concat_ws('', collect_list(a.facility_ph_map[1])) as facility_ph_map_3,
+    concat_ws('', collect_list(a.facility_zip_map[1])) as facility_zip_map_3,
+	concat_ws('', collect_list(a.facility_latitude_map[1])) as facility_latitude_map_3,
+    concat_ws('', collect_list(a.facility_longitude_map[1])) as facility_longitude_map_3,
+    concat_ws('', collect_list(a.direction_map[1])) as direction_map_3,
+
+    concat_ws('', collect_list(a.facility_name_map[1])) as facility_name_map_4,
+    concat_ws('', collect_list(a.facility_desc_map[1])) as facility_desc_map_4,
+    concat_ws('', collect_list(a.facility_add1_map[1])) as facility_add1_map_4,
+    concat_ws('', collect_list(a.facility_add2_map[1])) as facility_add2_map_4,
+    concat_ws('', collect_list(a.facility_state_map[1])) as facility_state_map_4,
+    concat_ws('', collect_list(a.facility_site_map[1])) as facility_site_map_4,
+    concat_ws('', collect_list(a.facility_ph_map[1])) as facility_ph_map_4,
+    concat_ws('', collect_list(a.facility_zip_map[1])) as facility_zip_map_4,
+		concat_ws('', collect_list(a.facility_latitude_map[1])) as facility_latitude_map_4,
+    concat_ws('', collect_list(a.facility_longitude_map[1])) as facility_longitude_map_4,
+    concat_ws('', collect_list(a.direction_map[1])) as direction_map_4,
+	
+    regexp_replace(
+        plotProviders(
+            Array(
+                cast(concat_ws('', collect_list(a.facility_latitude_map[1])) as float),
+                cast(concat_ws('', collect_list(a.facility_latitude_map[2])) as float),
+				cast(concat_ws('', collect_list(a.facility_latitude_map[3])) as float),
+				cast(concat_ws('', collect_list(a.facility_latitude_map[4])) as float)
+            ),
+
+            Array(
+                cast(concat_ws('', collect_list(a.facility_longitude_map[1])) as float),
+                cast(concat_ws('', collect_list(a.facility_longitude_map[2])) as float),
+                cast(concat_ws('', collect_list(a.facility_longitude_map[3])) as float),
+				cast(concat_ws('', collect_list(a.facility_longitude_map[4])) as float)
+            ),
+
+            Array(
+                Array(
+                    concat_ws('', collect_list(a.facility_add1_map_1[1])),
+                    concat_ws('', collect_list(a.facility_add2_map_1[1])),
+                    concat_ws('', collect_list(a.facility_state_map_1[1])),
+                    concat_ws('', collect_list(a.facility_zip_map_1[1]))
+                ),
+                Array(
+                    concat_ws('', collect_list(a.facility_add1_map_1[2])),
+                    concat_ws('', collect_list(a.facility_add2_map_1[2])),
+                    concat_ws('', collect_list(a.facility_state_map_1[2])),
+                    concat_ws('', collect_list(a.facility_zip_map_1[2]))
+                ),
+				Array(
+                    concat_ws('', collect_list(a.facility_add1_map_1[3])),
+                    concat_ws('', collect_list(a.facility_add2_map_1[3])),
+                    concat_ws('', collect_list(a.facility_state_map_1[3])),
+                    concat_ws('', collect_list(a.facility_zip_map_1[3]))
+                ),
+				Array(
+                    concat_ws('', collect_list(a.facility_add1_map_1[4])),
+                    concat_ws('', collect_list(a.facility_add2_map_1[4])),
+                    concat_ws('', collect_list(a.facility_state_map_1[4])),
+                    concat_ws('', collect_list(a.facility_zip_map_1[4]))
+                )
+            ),
+            'default', 
+            'default', 
+            'API KEY HERE' -- API key
+        ), 
+        'scale=1', 
+        'scale=2'
+    ) as map_url
+from member_recomendations
+group by
+    a.id,
+	a.name,
+	a.neighbourhood,
+	a.latitude,
+	a.longitude,
+	a.zip,
+	a.city,
+	a.state,
+	a.ruralcode;
+
+ 
+
+
+
+
+
